@@ -615,18 +615,34 @@ func (this *Client) GetTdxZs() ([]*protocol.TdxZs, error) {
 	return protocol.ParseTdxZs(data), nil
 }
 
-// GetBlockDataWithIndex 下载板块文件(block_*.dat)并按名称回填板块指数代码(id, 来自 zhb.zip 的 tdxzs.cfg)。
-// block 文件本身无 id，此方法额外拉取一次 zhb.zip 完成关联。
+// GetTdxBk 下载并解析 tdxbk.cfg(来自 zhb.zip) → 概念板块简称↔全称。
+func (this *Client) GetTdxBk() ([]*protocol.TdxBk, error) {
+	files, err := this.GetZHBFiles()
+	if err != nil {
+		return nil, err
+	}
+	data, ok := files[protocol.FileTdxBk]
+	if !ok {
+		return nil, fmt.Errorf("%s 中缺少 %s", protocol.ReportZHB, protocol.FileTdxBk)
+	}
+	return protocol.ParseTdxBk(data), nil
+}
+
+// GetBlockDataWithIndex 下载板块文件(block_*.dat)并按名称回填板块指数代码(id)。
+// block 文件本身无 id，关联链: 板块名 →(tdxzs.cfg)→ id；直接未命中再经
+// 简称 →(tdxbk.cfg)→ 全称 →(tdxzs.cfg)→ id 二次匹配。三个文件均来自 zhb.zip(仅下载一次)。
 func (this *Client) GetBlockDataWithIndex(file string) ([]*protocol.Block, error) {
 	blocks, err := this.GetBlockData(file)
 	if err != nil {
 		return nil, err
 	}
-	zs, err := this.GetTdxZs()
+	files, err := this.GetZHBFiles()
 	if err != nil {
 		return nil, err
 	}
-	protocol.FillBlockIndex(blocks, zs)
+	zs := protocol.ParseTdxZs(files[protocol.FileTdxZs])
+	bk := protocol.ParseTdxBk(files[protocol.FileTdxBk])
+	protocol.FillBlockIndexAlias(blocks, zs, bk)
 	return blocks, nil
 }
 

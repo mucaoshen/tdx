@@ -61,22 +61,24 @@ func main() {
 	s2bk := protocol.StockBlockIndex(stat2)
 	dumpStat(dir, stat, stat2, xgsg, s2bk)
 
-	// 4. 下载板块成分并回填 id
+	// 4. 下载板块成分并回填 id(简称→全称→id 链路)
+	bk := protocol.ParseTdxBk(files[protocol.FileTdxBk])
 	for _, bf := range []string{protocol.BlockFileZS, protocol.BlockFileGN, protocol.BlockFileFG} {
 		blocks, err := c.GetBlockData(bf)
 		if err != nil {
 			logs.Err(bf, err)
 			continue
 		}
-		matched := protocol.FillBlockIndex(blocks, zs)
+		direct := protocol.FillBlockIndex(blocks, zs)
+		matched := protocol.FillBlockIndexAlias(blocks, zs, bk)
 
 		var b strings.Builder
-		fmt.Fprintf(&b, "%s 共 %d 个板块, 命中 id %d 个\n\n", bf, len(blocks), matched)
+		fmt.Fprintf(&b, "%s 共 %d 个板块, 命中 id %d 个(直接 %d + tdxbk链路 %d)\n\n", bf, len(blocks), matched, direct, matched-direct)
 		for _, blk := range blocks {
 			fmt.Fprintf(&b, "id=%-8s 类型=%d 成分=%d 名称=%s\n  %s\n", blk.Index, blk.Type, len(blk.Codes), blk.Name, strings.Join(blk.Codes, " "))
 		}
 		logs.PanicErr(os.WriteFile(filepath.Join(dir, bf+".withid.txt"), []byte(b.String()), 0644))
-		logs.Infof("%-14s %d 板块, id 命中 %d → %s/%s.withid.txt\n", bf, len(blocks), matched, dir, bf)
+		logs.Infof("%-14s %d 板块, id 命中 %d (直接%d+链路%d) → %s/%s.withid.txt\n", bf, len(blocks), matched, direct, matched-direct, dir, bf)
 	}
 }
 
