@@ -17,19 +17,24 @@
 
 ## 🛠 功能列表 & 完成情况
 
-| 功能       | 状态    |
-|----------|-------|
-| 盘口(5档报价) | ✅ 已完成 |
-| 代码数量     | ✅ 已完成 |
-| 代码列表     | ✅ 已完成 |
-| 分时图      | ✅ 已完成 |
-| 历史分时图    | ✅ 已完成 |
-| 分时成交     | ✅ 已完成 |
-| 历史分时成交   | ✅ 已完成 |
-| K线       | ✅ 已完成 |
-| 历史K线     | ✅ 已完成 |
-| 股本变迁     | ✅ 已完成 |
-| 集合竞价     | ✅ 已完成 |
+| 功能             | 状态    | 主要方法                                            |
+|----------------|-------|-------------------------------------------------|
+| 盘口(5档报价)       | ✅ 已完成 | `GetQuote`                                      |
+| 代码数量/列表        | ✅ 已完成 | `GetCount` `GetCode` `GetCodeAll`               |
+| 分时图 / 历史分时图    | ✅ 已完成 | `GetMinute` `GetHistoryMinute`                  |
+| 分时成交 / 历史分时成交  | ✅ 已完成 | `GetTrade` `GetHistoryTrade`                    |
+| K线 / 历史K线 / 指数 | ✅ 已完成 | `GetKline*` `GetIndex*`                         |
+| 股本变迁(除权除息)     | ✅ 已完成 | `GetGbbq` `GetGbbqAll`                          |
+| 集合竞价           | ✅ 已完成 | `GetCallAuction`                               |
+| 财务信息           | ✅ 已完成 | `GetFinanceInfo`                               |
+| F10 公司资料       | ✅ 已完成 | `GetCompanyCategory` `GetCompanyContent`        |
+| 板块成分(地域/概念/指数) | ✅ 已完成 | `GetBlockData` `GetBlockDataWithIndex`          |
+| 行业归属(通达信/申万)   | ✅ 已完成 | `GetTdxHy`                                      |
+| 报表/配置文件下载      | ✅ 已完成 | `GetReportFile` `GetZHBFiles`                   |
+| 板块指数代码(id)映射   | ✅ 已完成 | `GetTdxZs` `GetTdxBk`                           |
+| 个股统计 / 资金流向    | ✅ 已完成 | `GetTdxStat` `GetTdxStat2`                      |
+| 新股申购           | ✅ 已完成 | `GetXgsg`                                       |
+| 扩展行情(期货/港股/外盘) | ✅ 已完成 | `DialExHq` + `ExQuote` `ExBars` `ExTrade` 等     |
 
 ---
 
@@ -62,6 +67,95 @@ func main() {
 
 	<-c.Done()
 }
+```
+
+---
+
+## 📦 板块与板块指数代码(id)
+
+板块成分文件(`block_*.dat`)本身**不含板块指数代码(id)**，id 映射在 `tdxzs.cfg`(全称)，而成分文件用简称，二者经 `tdxbk.cfg`(简称↔全称) 桥接。`GetBlockDataWithIndex` 自动完成关联(命中率约 100%)。
+
+```go
+c, _ := tdx.DialDefault()
+defer c.Close()
+
+// 板块成分 + 板块指数代码(id)。file 可选: protocol.BlockFileGN(概念)/FG(地域风格)/ZS(指数)
+blocks, _ := c.GetBlockDataWithIndex(protocol.BlockFileGN)
+for _, b := range blocks {
+	fmt.Printf("板块=%s id=%s 类型=%d 成分数=%d\n", b.Name, b.Index, b.Type, len(b.Codes))
+}
+
+// 仅成分(无 id, 不额外下载 zhb.zip)
+plain, _ := c.GetBlockData(protocol.BlockFileGN)
+_ = plain
+```
+
+---
+
+## 🗄 报表/配置数据 (zhb.zip)
+
+通达信板块/配置文件以 `zhb.zip` 总包经 report file 协议(0x06B9)整体下发，含 44 个文件(tdxzs.cfg/tdxbk.cfg/incon.dat/tdxstat.cfg 等)。
+
+```go
+// 任意报表文件原始字节(无需预查大小, 自动分块拉取)
+raw, _ := c.GetReportFile("zhb.zip")
+
+// 下载 zhb.zip 并解压 → 文件名→原始字节
+files, _ := c.GetZHBFiles()
+for name := range files { fmt.Println(name) }
+
+// 板块名↔指数代码(id)   /   概念简称↔全称
+zs, _ := c.GetTdxZs()   // []*protocol.TdxZs{Name, Code(880xxx), Type, ...}
+bk, _ := c.GetTdxBk()   // []*protocol.TdxBk{Short, Full}
+_ = zs; _ = bk
+```
+
+---
+
+## 📊 个股统计 / 资金流向 / 新股申购
+
+来自 `zhb.zip` 的全市场逐股数据。`tdxstat.cfg` 字段经 10 只大市值股对照实盘核验(见 `protocol/model_stat.go` 命中率注释)，未核验字段保留在 `Fields`。
+
+```go
+// 个股综合统计: 市盈TTM/静态市盈/股息率/涨跌幅/连涨连跌天数(均已核验)
+stat, _ := c.GetTdxStat()
+for _, s := range stat {
+	fmt.Printf("%s PE_TTM=%.2f 静PE=%.2f 股息=%.2f%% 连涨跌=%d\n",
+		s.Code, s.PETTM, s.PEStatic, s.DivYield, s.TrendDays)
+}
+
+// 资金流向 + 板块归属(股→板块id 反向映射)
+stat2, _ := c.GetTdxStat2()
+s2b := protocol.StockBlockIndex(stat2) // map[证券代码]板块指数代码
+_ = s2b
+
+// 新股申购
+xgsg, _ := c.GetXgsg()
+for _, x := range xgsg {
+	fmt.Printf("%s %s 申购日=%s 发行价=%.3f\n", x.Code, x.Name, x.Date, x.IssuePrice)
+}
+```
+
+> 完整演示见 [`example/DumpReportFile`](example/DumpReportFile)：下载 zhb.zip、解压、解析、板块 id 关联一条龙。
+
+---
+
+## 🌍 扩展行情 TdxExHq (期货 / 港股 / 外盘, 端口 7727)
+
+扩展行情走独立服务(端口 7727)，需用 `DialExHq*` 单独连接。
+
+```go
+ex, err := tdx.DialExHqDefault() // 或 DialExHq(addr) / DialExHqHosts(hosts)
+if err != nil { panic(err) }
+defer ex.Close()
+
+markets, _ := ex.ExMarkets()                       // 市场代码表
+n, _ := ex.ExCount()                               // 品种数量
+insts, _ := ex.ExInstruments(0, 100)               // 品种(代码)列表分页
+q, _ := ex.ExQuote(market, code)                   // 单品种五档行情
+bars, _ := ex.ExBars(category, market, code, 0, 20) // K线
+ticks, _ := ex.ExTrade(market, code, 0, 30)        // 分笔成交
+_ = markets; _ = n; _ = insts; _ = q; _ = bars; _ = ticks
 ```
 
 ---
