@@ -11,23 +11,23 @@ const (
 // TdxStat 个股综合统计指标(来自 tdxstat.cfg, 35 字段)。
 //
 // 字段下标按文件列(1 基)说明; Fields 为全部原始字段(0 基, 与文件列一一对应)。
-// 已核验字段(多股量级/排序/符号三角验证, 对照东方财富/腾讯实盘):
+// 已核验字段(10 只 >500 亿市值股票对照腾讯实盘 + 通达信同源日线, 见各字段后命中率):
 //
-//	[3]换手率% [4]市盈率TTM [6]连涨连跌天数 [7]涨跌幅% [10]静态市盈率 [11]股息率%。
+//	[4]市盈率TTM [6]连涨连跌天数 [7]涨跌幅% [10]静态市盈率 [11]股息率%。
 //
 // 其余字段为通达信内部格式、无官方文档, 不强行命名, 用 Fields 自取。
-// 量级反推不收敛(未命名): [12]/[15]/[16]/[25]/[35] 市值/股本/成交类, [18..22] 阶段涨跌幅, [9] 疑似量比。
+// 已排除(实测比例不恒定, 非对应指标): [3]非换手率, [12]/[15]/[16]/[25]非成交量/额/市值/股本。
+// 疑似(范围合理但未定): [18..22] 阶段涨跌幅, [9] 量比。
 type TdxStat struct {
 	Market uint8  // [1] 市场 0=深 1=沪 2=京
 	Code   string // [2] 证券代码
 	Date   string // [5] 数据日期 YYYYMMDD
 
-	TurnoverRate float64 // [3]  换手率%
-	PETTM        float64 // [4]  市盈率(TTM)
-	TrendDays    int     // [6]  连涨连跌天数(正=连涨, 负=连跌)
-	ChangePct    float64 // [7]  涨跌幅%
-	PEStatic     float64 // [10] 静态市盈率
-	DivYield     float64 // [11] 股息率%
+	PETTM     float64 // [4]  市盈率(TTM)        10/10 (±2%, 跨日)
+	TrendDays int     // [6]  连涨连跌天数(正涨负跌) 10/10 (同源日线精确)
+	ChangePct float64 // [7]  涨跌幅%            10/10 (同源日线精确)
+	PEStatic  float64 // [10] 静态市盈率          10/10 (±2%, 跨日)
+	DivYield  float64 // [11] 股息率%            8/10 (比亚迪/招行口径差异)
 
 	Fields []string // 全部 35 个原始字段(0 基)
 }
@@ -70,16 +70,15 @@ func ParseTdxStat(data []byte) []*TdxStat {
 			continue
 		}
 		out = append(out, &TdxStat{
-			Market:       uint8(Uint16FromStr(f[0])),
-			Code:         f[1],
-			Date:         field(f, 4),
-			TurnoverRate: Float64FromStr(field(f, 2)),  // 文件列[3]
-			PETTM:        Float64FromStr(field(f, 3)),  // 文件列[4]
-			TrendDays:    IntFromStr(field(f, 5)),      // 文件列[6]
-			ChangePct:    Float64FromStr(field(f, 6)),  // 文件列[7]
-			PEStatic:     Float64FromStr(field(f, 9)),  // 文件列[10]
-			DivYield:     Float64FromStr(field(f, 10)), // 文件列[11]
-			Fields:       f,
+			Market:    uint8(Uint16FromStr(f[0])),
+			Code:      f[1],
+			Date:      field(f, 4),
+			PETTM:     Float64FromStr(field(f, 3)),  // 文件列[4]
+			TrendDays: IntFromStr(field(f, 5)),      // 文件列[6]
+			ChangePct: Float64FromStr(field(f, 6)),  // 文件列[7]
+			PEStatic:  Float64FromStr(field(f, 9)),  // 文件列[10]
+			DivYield:  Float64FromStr(field(f, 10)), // 文件列[11]
+			Fields:    f,
 		})
 	}
 	return out
