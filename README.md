@@ -25,6 +25,7 @@
 | 分时成交 / 历史分时成交  | ✅ 已完成 | `GetTrade` `GetHistoryTrade`                    |
 | K线 / 历史K线 / 指数 | ✅ 已完成 | `GetKline*` `GetIndex*`                         |
 | 股本变迁(除权除息)     | ✅ 已完成 | `GetGbbq` `GetGbbqAll`                          |
+| 前/后复权(对齐通达信)   | ✅ 已完成 | `Gbbq.QFQKlineDay` `HFQKlineDay` `QFQ` `HFQ`     |
 | 集合竞价           | ✅ 已完成 | `GetCallAuction`                               |
 | 财务信息           | ✅ 已完成 | `GetFinanceInfo`                               |
 | F10 公司资料       | ✅ 已完成 | `GetCompanyCategory` `GetCompanyContent`        |
@@ -89,6 +90,43 @@ for _, b := range blocks {
 plain, _ := c.GetBlockData(protocol.BlockFileGN)
 _ = plain
 ```
+
+---
+
+## 🔁 复权日线 (前复权 / 后复权, 对齐通达信)
+
+复权基于股本变迁(gbbq)的除权除息事件做**仿射变换** `price_adj = QFQMul × price_raw + QFQAdd`，
+结果**四舍五入到分(2 位小数)，与电脑端通达信桌面端逐日对齐**(含配股、大比例送转、股改停牌复合事件均已实盘核验)。
+成交量/额不复权。`Gbbq` 内置 gbbq 数据自动更新与本地缓存(sqlite)。
+
+```go
+c, _ := tdx.DialDefault()
+defer c.Close()
+
+gb, _ := tdx.NewGbbq(tdx.WithGbbqClient(c)) // 首次会拉取并缓存 gbbq
+
+// 方式一: 一步到位拉取全量历史 + 复权
+qfq, _ := gb.QFQKlineDay("sh600519") // 前复权日线
+hfq, _ := gb.HFQKlineDay("sh600519") // 后复权日线
+for _, k := range qfq {
+	fmt.Printf("%s 开%.2f 高%.2f 低%.2f 收%.2f\n",
+		k.Time.Format("2006-01-02"), k.Open.Float64(), k.High.Float64(), k.Low.Float64(), k.Close.Float64())
+}
+
+// 方式二: 已有不复权 K 线时直接复权
+resp, _ := c.GetKlineDayAll("sh600519")
+qfq2 := gb.QFQ("sh600519", resp.List)
+_ = qfq2
+
+// 方式三: 仅取复权因子(每个除权区间一个仿射系数), 自行施加
+fs := gb.GetFactors("sh600519", resp.List)
+for _, f := range fs {
+	_ = f.QFQPrice(protocol.Yuan(100)) // 对任意原始价做前复权
+}
+```
+
+> 价格类型 `protocol.Price` 为 **int64, 单位厘(元×1000)**，`.Float64()` 得元。股票最小变动 0.01 元(分)，ETF/可转债/指数到 0.001 元(厘)。
+> 完整演示见 [`example/GetQFQKline`](example/GetQFQKline)。
 
 ---
 

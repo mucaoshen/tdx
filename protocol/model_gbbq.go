@@ -416,3 +416,35 @@ func roundHalfUpYuan(yuan float64) Price {
 	cents := math.Round(yuan * 100)
 	return Price(cents * 10) // 1 分 = 10 厘
 }
+
+// ApplyQFQ 用前复权因子 fs 按日期对齐, 把不复权日线 ks 整段转为前复权日线。
+// OHLC 与昨收均复权(四舍五入到分, 对齐通达信桌面端), 成交量/额不变。
+// fs 由 (XRXDs).Pre(ks).Factors() 或 Gbbq.GetFactors 生成。返回新切片, 不改原 ks。
+func ApplyQFQ(ks Klines, fs []*Factor) Klines { return applyFQ(ks, fs, true) }
+
+// ApplyHFQ 用后复权因子把不复权日线整段转为后复权日线。见 ApplyQFQ。
+func ApplyHFQ(ks Klines, fs []*Factor) Klines { return applyFQ(ks, fs, false) }
+
+func applyFQ(ks Klines, fs []*Factor, qfq bool) Klines {
+	fm := make(map[int64]*Factor, len(fs))
+	for _, f := range fs {
+		fm[f.Time.Unix()] = f
+	}
+	out := make(Klines, len(ks))
+	for i, k := range ks {
+		nk := *k
+		if f := fm[k.Time.Unix()]; f != nil {
+			price := f.QFQPrice
+			if !qfq {
+				price = f.HFQPrice
+			}
+			nk.Last = price(k.Last)
+			nk.Open = price(k.Open)
+			nk.High = price(k.High)
+			nk.Low = price(k.Low)
+			nk.Close = price(k.Close)
+		}
+		out[i] = &nk
+	}
+	return out
+}
