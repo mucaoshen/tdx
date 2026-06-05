@@ -1,8 +1,11 @@
 package tdx
 
 import (
+	"archive/zip"
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"runtime/debug"
 	"sync/atomic"
 	"time"
@@ -174,6 +177,58 @@ func (this *Client) handlerDealMessage(c *client.Client, msg ios.Acker) {
 
 	case protocol.TypeGbbq:
 		resp, err = protocol.MGbbq.Decode(f.Data)
+
+	case protocol.TypeBlockMeta:
+		resp, err = protocol.MBlock.DecodeMeta(f.Data)
+
+	case protocol.TypeBlockInfo:
+		resp, err = protocol.MBlock.DecodeInfo(f.Data)
+
+	case protocol.TypeFinance:
+		resp, err = protocol.MFinance.Decode(f.Data)
+
+	case protocol.TypeCompanyCat:
+		resp, err = protocol.MCompanyCat.Decode(f.Data)
+
+	case protocol.TypeCompanyContent:
+		resp, err = protocol.MCompanyContent.Decode(f.Data)
+
+	// ---- 扩展行情(TdxExHq) ----
+	case protocol.TypeExSetup:
+		// 握手响应忽略
+
+	case protocol.TypeExMarkets:
+		resp, err = protocol.MEx.DecodeMarkets(f.Data)
+
+	case protocol.TypeExCount:
+		resp, err = protocol.MEx.DecodeCount(f.Data)
+
+	case protocol.TypeExInstrument:
+		resp, err = protocol.MEx.DecodeInstrument(f.Data)
+
+	case protocol.TypeExQuote:
+		resp, err = protocol.MEx.DecodeQuote(f.Data)
+
+	case protocol.TypeExQuoteList:
+		resp, err = protocol.MEx.DecodeQuoteList(f.Data, val.(protocol.ExQuoteListCache))
+
+	case protocol.TypeExBars:
+		resp, err = protocol.MEx.DecodeBars(f.Data, val.(protocol.ExBarsCache))
+
+	case protocol.TypeExMinute:
+		resp, err = protocol.MEx.DecodeMinute(f.Data)
+
+	case protocol.TypeExHistMinute:
+		resp, err = protocol.MEx.DecodeHistMinute(f.Data)
+
+	case protocol.TypeExTrade:
+		resp, err = protocol.MEx.DecodeTrade(f.Data, val.(protocol.ExTradeCache))
+
+	case protocol.TypeExHistTrade:
+		resp, err = protocol.MEx.DecodeHistTrade(f.Data, val.(protocol.ExTradeCache))
+
+	case protocol.TypeExBarsRange:
+		resp, err = protocol.MEx.DecodeBarsRange(f.Data)
 
 	default:
 		err = fmt.Errorf("通讯类型未解析:0x%X", f.Type)
@@ -422,19 +477,228 @@ func (this *Client) GetGbbqAll() (map[string][]*protocol.Gbbq, error) {
 	return gbbqs, nil
 }
 
-// GetMinute 获取分时数据,todo 解析好像不对,先用历史数据
-func (this *Client) GetMinute(code string) (*protocol.MinuteResp, error) {
-	return this.GetHistoryMinute(time.Now().Format("20060102"), code)
-
-	f, err := protocol.MMinute.Frame(code)
+// GetCompanyCategory 获取 F10 公司信息分类目录。
+func (this *Client) GetCompanyCategory(exchange protocol.Exchange, code string) ([]protocol.CompanyCategory, error) {
+	r, err := this.SendFrame(protocol.MCompanyCat.Frame(exchange.Uint8(), code))
 	if err != nil {
 		return nil, err
 	}
+	return r.([]protocol.CompanyCategory), nil
+}
+
+// GetCompanyContent 获取 F10 某分类的文本内容。
+func (this *Client) GetCompanyContent(exchange protocol.Exchange, code, filename string, start, length uint32) (string, error) {
+	r, err := this.SendFrame(protocol.MCompanyContent.Frame(exchange.Uint8(), code, filename, start, length))
+	if err != nil {
+		return "", err
+	}
+	return r.(string), nil
+}
+
+// GetFinanceInfo 获取标的财务/基本面信息（流通股本/总股本/行业/地域/股东户数/财务）。
+func (this *Client) GetFinanceInfo(exchange protocol.Exchange, code string) (*protocol.FinanceInfo, error) {
+	f := protocol.MFinance.Frame(exchange.Uint8(), code)
 	result, err := this.SendFrame(f)
 	if err != nil {
 		return nil, err
 	}
-	return result.(*protocol.MinuteResp), nil
+	return result.(*protocol.FinanceInfo), nil
+}
+
+// GetBlockFileRaw 下载通达信服务器文件（板块/配置）原始字节，分块拉取后拼接。
+// 适用于二进制板块文件(block*.dat)与文本配置(tdxhy.cfg 等)。
+func (this *Client) GetBlockFileRaw(file string) ([]byte, error) {
+	mr, err := this.SendFrame(protocol.MBlock.FrameMeta(file))
+	if err != nil {
+		return nil, err
+	}
+	meta, ok := mr.(*protocol.BlockMetaResp)
+	if !ok || meta.Size == 0 {
+		return nil, fmt.Errorf("板块文件 %s 无数据", file)
+	}
+	var buf []byte
+	start := uint32(0)
+	for start < meta.Size {
+		n := uint32(0x7530)
+		if meta.Size-start < n {
+			n = meta.Size - start
+		}
+		r, err := this.SendFrame(protocol.MBlock.FrameInfo(start, n, file))
+		if err != nil {
+			return nil, err
+		}
+		info, ok := r.(*protocol.BlockInfoResp)
+		if !ok || len(info.Data) == 0 {
+			break
+		}
+		buf = append(buf, info.Data...)
+		start += uint32(len(info.Data))
+	}
+	return buf, nil
+}
+
+// GetBlockData 下载并解析通达信板块文件（如 protocol.BlockFileGN 概念）→ 板块列表。
+func (this *Client) GetBlockData(file string) ([]*protocol.Block, error) {
+	buf, err := this.GetBlockFileRaw(file)
+	if err != nil {
+		return nil, err
+	}
+	return protocol.ParseBlockFile(buf), nil
+}
+
+// GetReportFile 下载通达信服务器任意报表/数据文件（report file，指令 0x06B9）原始字节。
+// 与 GetBlockFileRaw 共用同一传输帧，区别在于报表文件无 0x02C5 元信息预查文件大小，
+// 故按 0x7530 块大小循环递增 offset 拉取，直到返回块短于请求块（末块）或为空时终止。
+// 对齐 pytdx GetReportFile / mitdx get_report_file。
+func (this *Client) GetReportFile(file string) ([]byte, error) {
+	const chunk = uint32(0x7530)
+	var buf []byte
+	start := uint32(0)
+	for {
+		r, err := this.SendFrame(protocol.MBlock.FrameInfo(start, chunk, file))
+		if err != nil {
+			return nil, err
+		}
+		info, ok := r.(*protocol.BlockInfoResp)
+		if !ok || len(info.Data) == 0 {
+			break
+		}
+		buf = append(buf, info.Data...)
+		start += uint32(len(info.Data))
+		if uint32(len(info.Data)) < chunk {
+			break
+		}
+	}
+	return buf, nil
+}
+
+// GetZHBFiles 下载板块/配置数据总包 zhb.zip(report file 0x06B9)并解压，返回 文件名→原始字节。
+// zhb.zip 内含 tdxzs.cfg(板块指数代码)、tdxbk.cfg(概念板块)、incon.dat(行业分类)等配置文件。
+func (this *Client) GetZHBFiles() (map[string][]byte, error) {
+	raw, err := this.GetReportFile(protocol.ReportZHB)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("%s 无数据", protocol.ReportZHB)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		return nil, fmt.Errorf("解压 %s 失败: %w", protocol.ReportZHB, err)
+	}
+	out := make(map[string][]byte, len(zr.File))
+	for _, f := range zr.File {
+		rc, err := f.Open()
+		if err != nil {
+			return nil, err
+		}
+		b, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return nil, err
+		}
+		out[f.Name] = b
+	}
+	return out, nil
+}
+
+// GetTdxZs 下载并解析板块指数配置 tdxzs.cfg(来自 zhb.zip) → 板块名↔指数代码(id) 列表。
+func (this *Client) GetTdxZs() ([]*protocol.TdxZs, error) {
+	files, err := this.GetZHBFiles()
+	if err != nil {
+		return nil, err
+	}
+	data, ok := files[protocol.FileTdxZs]
+	if !ok {
+		return nil, fmt.Errorf("%s 中缺少 %s", protocol.ReportZHB, protocol.FileTdxZs)
+	}
+	return protocol.ParseTdxZs(data), nil
+}
+
+// GetTdxBk 下载并解析 tdxbk.cfg(来自 zhb.zip) → 概念板块简称↔全称。
+func (this *Client) GetTdxBk() ([]*protocol.TdxBk, error) {
+	files, err := this.GetZHBFiles()
+	if err != nil {
+		return nil, err
+	}
+	data, ok := files[protocol.FileTdxBk]
+	if !ok {
+		return nil, fmt.Errorf("%s 中缺少 %s", protocol.ReportZHB, protocol.FileTdxBk)
+	}
+	return protocol.ParseTdxBk(data), nil
+}
+
+// GetBlockDataWithIndex 下载板块文件(block_*.dat)并按名称回填板块指数代码(id)。
+// block 文件本身无 id，关联链: 板块名 →(tdxzs.cfg)→ id；直接未命中再经
+// 简称 →(tdxbk.cfg)→ 全称 →(tdxzs.cfg)→ id 二次匹配。三个文件均来自 zhb.zip(仅下载一次)。
+func (this *Client) GetBlockDataWithIndex(file string) ([]*protocol.Block, error) {
+	blocks, err := this.GetBlockData(file)
+	if err != nil {
+		return nil, err
+	}
+	files, err := this.GetZHBFiles()
+	if err != nil {
+		return nil, err
+	}
+	zs := protocol.ParseTdxZs(files[protocol.FileTdxZs])
+	bk := protocol.ParseTdxBk(files[protocol.FileTdxBk])
+	protocol.FillBlockIndexAlias(blocks, zs, bk)
+	return blocks, nil
+}
+
+// GetTdxStat 下载并解析 tdxstat.cfg(来自 zhb.zip) → 全市场个股综合统计指标。
+func (this *Client) GetTdxStat() ([]*protocol.TdxStat, error) {
+	files, err := this.GetZHBFiles()
+	if err != nil {
+		return nil, err
+	}
+	data, ok := files[protocol.FileTdxStat]
+	if !ok {
+		return nil, fmt.Errorf("%s 中缺少 %s", protocol.ReportZHB, protocol.FileTdxStat)
+	}
+	return protocol.ParseTdxStat(data), nil
+}
+
+// GetTdxStat2 下载并解析 tdxstat2.cfg(来自 zhb.zip) → 全市场个股资金流向 + 板块归属。
+// 其 BlockIndex 字段提供 股→板块指数代码(id) 的反向映射(见 protocol.StockBlockIndex)。
+func (this *Client) GetTdxStat2() ([]*protocol.TdxStat2, error) {
+	files, err := this.GetZHBFiles()
+	if err != nil {
+		return nil, err
+	}
+	data, ok := files[protocol.FileTdxStat2]
+	if !ok {
+		return nil, fmt.Errorf("%s 中缺少 %s", protocol.ReportZHB, protocol.FileTdxStat2)
+	}
+	return protocol.ParseTdxStat2(data), nil
+}
+
+// GetXgsg 下载并解析 xgsg.cfg(来自 zhb.zip) → 新股申购列表。
+func (this *Client) GetXgsg() ([]*protocol.TdxXgsg, error) {
+	files, err := this.GetZHBFiles()
+	if err != nil {
+		return nil, err
+	}
+	data, ok := files[protocol.FileXgsg]
+	if !ok {
+		return nil, fmt.Errorf("%s 中缺少 %s", protocol.ReportZHB, protocol.FileXgsg)
+	}
+	return protocol.ParseXgsg(data), nil
+}
+
+// GetTdxHy 下载并解析 tdxhy.cfg → 每只股票的通达信/申万行业归属。
+func (this *Client) GetTdxHy() ([]*protocol.TdxHy, error) {
+	buf, err := this.GetBlockFileRaw(protocol.FileTdxHy)
+	if err != nil {
+		return nil, err
+	}
+	return protocol.ParseTdxHy(buf), nil
+}
+
+// GetMinute 获取分时数据,todo 解析好像不对,先用历史数据
+func (this *Client) GetMinute(code string) (*protocol.MinuteResp, error) {
+	// 实时分时解析存疑，移植后暂统一走历史分时（去除原 unreachable 实现以过 vet）。
+	return this.GetHistoryMinute(time.Now().Format("20060102"), code)
 }
 
 // GetHistoryMinute 获取历史分时数据

@@ -191,6 +191,35 @@ func (this *Gbbq) GetFactors(code string, ks protocol.Klines) []*protocol.Factor
 	return this.GetXRXDs(code).Pre(ks).Factors()
 }
 
+// QFQ 把已获取的不复权日线 ks 转为前复权日线(对齐通达信桌面端, 四舍五入到分)。
+// 已有 K 线时用此方法; 若要一步到位拉取+复权用 QFQKlineDay。
+func (this *Gbbq) QFQ(code string, ks protocol.Klines) protocol.Klines {
+	return protocol.ApplyQFQ(ks, this.GetFactors(code, ks))
+}
+
+// HFQ 把已获取的不复权日线转为后复权日线。见 QFQ。
+func (this *Gbbq) HFQ(code string, ks protocol.Klines) protocol.Klines {
+	return protocol.ApplyHFQ(ks, this.GetFactors(code, ks))
+}
+
+// QFQKlineDay 一站式获取前复权日线(全量历史): 拉取不复权日K + 前复权(对齐通达信)。
+func (this *Gbbq) QFQKlineDay(code string) (protocol.Klines, error) {
+	resp, err := this.c.GetKlineDayAll(code)
+	if err != nil {
+		return nil, err
+	}
+	return this.QFQ(code, resp.List), nil
+}
+
+// HFQKlineDay 一站式获取后复权日线(全量历史)。见 QFQKlineDay。
+func (this *Gbbq) HFQKlineDay(code string) (protocol.Klines, error) {
+	resp, err := this.c.GetKlineDayAll(code)
+	if err != nil {
+		return nil, err
+	}
+	return this.HFQ(code, resp.List), nil
+}
+
 func (this *Gbbq) GetTurnover(code string, t time.Time, volume int64) float64 {
 	x := this.GetEquity(code, t)
 	if x == nil {
