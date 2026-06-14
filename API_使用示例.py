@@ -11,7 +11,7 @@ import json
 from datetime import datetime
 
 # 配置
-BASE_URL = "http://localhost:8080"  # 修改为你的服务器地址
+BASE_URL = "http://127.0.0.1:5500"  # tdx RESTful API 地址
 
 class StockAPI:
     """股票数据API客户端"""
